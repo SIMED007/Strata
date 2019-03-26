@@ -14,7 +14,6 @@ import static com.opengamma.strata.loader.csv.TradeCsvLoader.NOTIONAL_FIELD;
 import java.time.LocalDate;
 import java.util.Optional;
 
-import com.opengamma.strata.basics.currency.Currency;
 import com.opengamma.strata.basics.currency.CurrencyAmount;
 import com.opengamma.strata.basics.currency.CurrencyPair;
 import com.opengamma.strata.basics.currency.FxRate;
@@ -65,15 +64,13 @@ class FxSwapTradeCsvLoader {
   private static FxSwapTrade parseConvention(CsvRow row, TradeInfo info) {
     CurrencyPair pair = CurrencyPair.parse(row.getValue(CONVENTION_FIELD));
     BuySell buySell = LoaderUtils.parseBuySell(row.getValue(BUY_SELL_FIELD));
-    Currency currency = Currency.parse(row.getValue(CURRENCY_FIELD));
-    double notional = LoaderUtils.parseDouble(row.getValue(NOTIONAL_FIELD));
+    CurrencyAmount amount = buySell.normalize(CsvLoaderUtils.parseCurrencyAmount(row, CURRENCY_FIELD, NOTIONAL_FIELD));
     double nearFxRate = LoaderUtils.parseDouble(row.getValue(FX_RATE_FIELD));
     double farFxRate = LoaderUtils.parseDouble(row.getValue(FAR_FX_RATE_DATE_FIELD));
     LocalDate nearPaymentDate = LoaderUtils.parseDate(row.getValue(PAYMENT_DATE_FIELD));
     LocalDate farPaymentDate = LoaderUtils.parseDate(row.getValue(FAR_PAYMENT_DATE_FIELD));
     Optional<BusinessDayAdjustment> paymentAdj = FxSingleTradeCsvLoader.parsePaymentDateAdjustment(row);
 
-    CurrencyAmount amount = CurrencyAmount.of(currency, buySell.normalize(notional));
     FxRate nearRate = FxRate.of(pair, nearFxRate);
     FxRate farRate = FxRate.of(pair, farFxRate);
     FxSwap fx = paymentAdj
