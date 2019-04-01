@@ -9,15 +9,20 @@ import static com.opengamma.strata.basics.date.BusinessDayConventions.FOLLOWING;
 import static com.opengamma.strata.loader.csv.TradeCsvLoader.CURRENCY_FIELD;
 import static com.opengamma.strata.loader.csv.TradeCsvLoader.DIRECTION_FIELD;
 import static com.opengamma.strata.loader.csv.TradeCsvLoader.NOTIONAL_FIELD;
+import static com.opengamma.strata.loader.csv.TradeCsvLoader.PAYMENT_DATE_CAL_FIELD;
+import static com.opengamma.strata.loader.csv.TradeCsvLoader.PAYMENT_DATE_CNV_FIELD;
 import static com.opengamma.strata.loader.csv.TradeCsvLoader.PAYMENT_DATE_FIELD;
 
 import java.time.LocalDate;
+import java.util.List;
 
+import com.google.common.collect.ImmutableList;
 import com.opengamma.strata.basics.currency.Currency;
 import com.opengamma.strata.basics.currency.CurrencyAmount;
 import com.opengamma.strata.basics.date.AdjustableDate;
 import com.opengamma.strata.basics.date.BusinessDayAdjustment;
 import com.opengamma.strata.basics.date.HolidayCalendarId;
+import com.opengamma.strata.collect.io.CsvOutput.CsvRowOutputWithHeaders;
 import com.opengamma.strata.collect.io.CsvRow;
 import com.opengamma.strata.loader.LoaderUtils;
 import com.opengamma.strata.product.TradeInfo;
@@ -26,10 +31,26 @@ import com.opengamma.strata.product.payment.BulletPayment;
 import com.opengamma.strata.product.payment.BulletPaymentTrade;
 
 /**
- * Loads BulletPayment trades from CSV files.
+ * Handles the CSV file format for Bullet Payment trades.
  */
-final class BulletPaymentTradeCsvPlugin {
+final class BulletPaymentTradeCsvPlugin implements TradeTypeCsvWriter<BulletPaymentTrade> {
 
+  /**
+   * The singleton instance of the plugin.
+   */
+  public static final TradeTypeCsvWriter<BulletPaymentTrade> INSTANCE = new BulletPaymentTradeCsvPlugin();
+
+  /** The headers. */
+  private static final ImmutableList<String> HEADERS = ImmutableList.<String>builder()
+      .add(DIRECTION_FIELD)
+      .add(CURRENCY_FIELD)
+      .add(NOTIONAL_FIELD)
+      .add(PAYMENT_DATE_FIELD)
+      .add(PAYMENT_DATE_CNV_FIELD)
+      .add(PAYMENT_DATE_CAL_FIELD)
+      .build();
+
+  //-------------------------------------------------------------------------
   /**
    * Parses from the CSV row.
    * 
@@ -57,6 +78,25 @@ final class BulletPaymentTradeCsvPlugin {
         .value(amount)
         .date(AdjustableDate.of(paymentDate, paymentAdj));
     return BulletPaymentTrade.of(info, builder.build());
+  }
+
+  //-------------------------------------------------------------------------
+  @Override
+  public List<String> headers(List<BulletPaymentTrade> trades) {
+    return HEADERS;
+  }
+
+  @Override
+  public void writeCsv(CsvRowOutputWithHeaders csv, BulletPaymentTrade trade) {
+    BulletPayment product = trade.getProduct();
+    csv.writeCell(TradeCsvLoader.TYPE_FIELD, "BulletPayment");
+    csv.writeCell(DIRECTION_FIELD, product.getPayReceive());
+    csv.writeCell(CURRENCY_FIELD, product.getValue().getCurrency());
+    csv.writeCell(NOTIONAL_FIELD, product.getValue().getAmount());
+    csv.writeCell(PAYMENT_DATE_FIELD, product.getDate().getUnadjusted());
+    csv.writeCell(PAYMENT_DATE_CAL_FIELD, product.getDate().getAdjustment().getCalendar());
+    csv.writeCell(PAYMENT_DATE_CNV_FIELD, product.getDate().getAdjustment().getConvention());
+    csv.writeNewLine();
   }
 
   //-------------------------------------------------------------------------

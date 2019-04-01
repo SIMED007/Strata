@@ -5,6 +5,9 @@
  */
 package com.opengamma.strata.loader.csv;
 
+import static com.opengamma.strata.collect.Guavate.filtering;
+import static com.opengamma.strata.collect.Guavate.toImmutableSet;
+import static com.opengamma.strata.loader.csv.SwapTradeCsvPlugin.KNOWN_AMOUNT_FIELD;
 import static com.opengamma.strata.loader.csv.TradeCsvLoader.CURRENCY_FIELD;
 import static com.opengamma.strata.loader.csv.TradeCsvLoader.DATE_ADJ_CAL_FIELD;
 import static com.opengamma.strata.loader.csv.TradeCsvLoader.DATE_ADJ_CNV_FIELD;
@@ -19,8 +22,10 @@ import static com.opengamma.strata.loader.csv.TradeCsvLoader.START_DATE_FIELD;
 import java.time.LocalDate;
 import java.time.Period;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -48,8 +53,11 @@ import com.opengamma.strata.basics.index.PriceIndex;
 import com.opengamma.strata.basics.schedule.Frequency;
 import com.opengamma.strata.basics.schedule.PeriodicSchedule;
 import com.opengamma.strata.basics.schedule.StubConvention;
+import com.opengamma.strata.basics.value.ValueAdjustmentType;
 import com.opengamma.strata.basics.value.ValueSchedule;
+import com.opengamma.strata.basics.value.ValueStep;
 import com.opengamma.strata.collect.Guavate;
+import com.opengamma.strata.collect.io.CsvOutput.CsvRowOutputWithHeaders;
 import com.opengamma.strata.collect.io.CsvRow;
 import com.opengamma.strata.loader.LoaderUtils;
 import com.opengamma.strata.product.TradeInfo;
@@ -58,12 +66,14 @@ import com.opengamma.strata.product.swap.CompoundingMethod;
 import com.opengamma.strata.product.swap.FixedRateCalculation;
 import com.opengamma.strata.product.swap.FixedRateStubCalculation;
 import com.opengamma.strata.product.swap.FixingRelativeTo;
+import com.opengamma.strata.product.swap.FutureValueNotional;
 import com.opengamma.strata.product.swap.FxResetCalculation;
 import com.opengamma.strata.product.swap.FxResetFixingRelativeTo;
 import com.opengamma.strata.product.swap.IborRateCalculation;
 import com.opengamma.strata.product.swap.IborRateResetMethod;
 import com.opengamma.strata.product.swap.IborRateStubCalculation;
 import com.opengamma.strata.product.swap.InflationRateCalculation;
+import com.opengamma.strata.product.swap.KnownAmountSwapLeg;
 import com.opengamma.strata.product.swap.NegativeRateMethod;
 import com.opengamma.strata.product.swap.NotionalSchedule;
 import com.opengamma.strata.product.swap.OvernightAccrualMethod;
@@ -74,14 +84,21 @@ import com.opengamma.strata.product.swap.PriceIndexCalculationMethod;
 import com.opengamma.strata.product.swap.RateCalculation;
 import com.opengamma.strata.product.swap.RateCalculationSwapLeg;
 import com.opengamma.strata.product.swap.ResetSchedule;
+import com.opengamma.strata.product.swap.ScheduledSwapLeg;
 import com.opengamma.strata.product.swap.Swap;
 import com.opengamma.strata.product.swap.SwapLeg;
+import com.opengamma.strata.product.swap.SwapLegType;
 import com.opengamma.strata.product.swap.SwapTrade;
 
 /**
- * Loads Swap trades from CSV files.
+ * Handles the CSV file format for Swap trades.
  */
-final class FullSwapTradeCsvPlugin {
+final class FullSwapTradeCsvPlugin implements TradeTypeCsvWriter<SwapTrade> {
+
+  /**
+   * The singleton instance of the plugin.
+   */
+  public static final TradeTypeCsvWriter<SwapTrade> INSTANCE = new FullSwapTradeCsvPlugin();
 
   // CSV column headers
   private static final String FREQUENCY_FIELD = "Frequency";
@@ -117,13 +134,16 @@ final class FullSwapTradeCsvPlugin {
   private static final String FX_RESET_OFFSET_CAL_FIELD = "FX Reset Offset Calendar";
   private static final String FX_RESET_OFFSET_ADJ_CNV_FIELD = "FX Reset Offset Adjustment Convention";
   private static final String FX_RESET_OFFSET_ADJ_CAL_FIELD = "FX Reset Offset Adjustment Calendar";
+  private static final String FX_RESET_INITIAL_NOTIONAL_FIELD = "FX Reset Initial Notional";
 
   private static final String INITIAL_STUB_RATE_FIELD = "Initial Stub Rate";
   private static final String INITIAL_STUB_AMOUNT_FIELD = "Initial Stub Amount";
+  private static final String INITIAL_STUB_AMOUNT_CURRENCY_FIELD = "Initial Stub Amount Currency";
   private static final String INITIAL_STUB_INDEX_FIELD = "Initial Stub Index";
   private static final String INITIAL_STUB_INTERPOLATED_INDEX_FIELD = "Initial Stub Interpolated Index";
   private static final String FINAL_STUB_RATE_FIELD = "Final Stub Rate";
   private static final String FINAL_STUB_AMOUNT_FIELD = "Final Stub Amount";
+  private static final String FINAL_STUB_AMOUNT_CURRENCY_FIELD = "Final Stub Amount Currency";
   private static final String FINAL_STUB_INDEX_FIELD = "Final Stub Index";
   private static final String FINAL_STUB_INTERPOLATED_INDEX_FIELD = "Final Stub Interpolated Index";
   private static final String RESET_FREQUENCY_FIELD = "Reset Frequency";
@@ -135,8 +155,10 @@ final class FullSwapTradeCsvPlugin {
   private static final String FIXING_OFFSET_CAL_FIELD = "Fixing Offset Calendar";
   private static final String FIXING_OFFSET_ADJ_CNV_FIELD = "Fixing Offset Adjustment Convention";
   private static final String FIXING_OFFSET_ADJ_CAL_FIELD = "Fixing Offset Adjustment Calendar";
+  private static final String FUTURE_VALUE_NOTIONAL_FIELD = "Future Value Notional";
   private static final String NEGATIVE_RATE_METHOD_FIELD = "Negative Rate Method";
   private static final String FIRST_RATE_FIELD = "First Rate";
+  private static final String FIRST_REGULAR_RATE_FIELD = "First Regular Rate";
   private static final String ACCRUAL_METHOD_FIELD = "Accrual Method";
   private static final String RATE_CUT_OFF_DAYS_FIELD = "Rate Cut Off Days";
   private static final String INFLATION_LAG_FIELD = "Inflation Lag";
@@ -146,6 +168,7 @@ final class FullSwapTradeCsvPlugin {
   private static final String GEARING_FIELD = "Gearing";
   private static final String SPREAD_FIELD = "Spread";
 
+  //-------------------------------------------------------------------------
   /**
    * Parses from the CSV row.
    * 
@@ -358,6 +381,9 @@ final class FullSwapTradeCsvPlugin {
       fxResetBuilder.referenceCurrency(notionalCurrencyOpt.orElse(fxIndex.getCurrencyPair().other(currency)));
       fxFixingRelativeToOpt.ifPresent(v -> fxResetBuilder.fixingRelativeTo(v));
       fxResetAdjOpt.ifPresent(v -> fxResetBuilder.fixingDateOffset(v));
+      findValue(row, leg, FX_RESET_INITIAL_NOTIONAL_FIELD)
+          .map(s -> LoaderUtils.parseDouble(s))
+          .ifPresent(initialNotional -> fxResetBuilder.initialNotionalValue(initialNotional));
       builder.fxReset(fxResetBuilder.build());
     } else if (notionalCurrencyOpt.isPresent() || fxFixingRelativeToOpt.isPresent() || fxResetAdjOpt.isPresent()) {
       throw new IllegalArgumentException("Swap trade FX Reset must define field '" + leg + FX_RESET_INDEX_FIELD + "'");
@@ -424,6 +450,9 @@ final class FullSwapTradeCsvPlugin {
     }
     builder.dayCount(dayCount);
     builder.rate(ValueSchedule.of(fixedRate));
+    findValue(row, leg, FUTURE_VALUE_NOTIONAL_FIELD)
+        .map(s -> LoaderUtils.parseDouble(s))
+        .ifPresent(val -> builder.futureValueNotional(FutureValueNotional.of(val)));
     // initial stub
     Optional<Double> initialStubRateOpt = findValue(row, leg, INITIAL_STUB_RATE_FIELD)
         .map(s -> LoaderUtils.parseDoublePercent(s));
@@ -497,6 +526,9 @@ final class FullSwapTradeCsvPlugin {
     findValue(row, leg, FIRST_RATE_FIELD)
         .map(s -> LoaderUtils.parseDoublePercent(s))
         .ifPresent(v -> builder.firstRate(v));
+    findValue(row, leg, FIRST_REGULAR_RATE_FIELD)
+        .map(s -> LoaderUtils.parseDoublePercent(s))
+        .ifPresent(v -> builder.firstRegularRate(v));
     findValue(row, leg, GEARING_FIELD)
         .map(s -> LoaderUtils.parseDouble(s))
         .ifPresent(v -> builder.gearing(ValueSchedule.of(v)));
@@ -728,6 +760,407 @@ final class FullSwapTradeCsvPlugin {
   // finds value from CSV
   private static Optional<String> findValueWithFallback(CsvRow row, String leg, String field) {
     return Guavate.firstNonEmpty(row.findValue(leg + field), row.findValue(field));
+  }
+
+  //-------------------------------------------------------------------------
+  @Override
+  public List<String> headers(List<SwapTrade> trades) {
+    int legs = trades.stream()
+        .mapToInt(trade -> trade.getProduct().getLegs().size())
+        .max()
+        .getAsInt();  // input guaranteed to be at one trade
+    Set<SwapLegType> legTypes = trades.stream()
+        .flatMap(trade -> trade.getProduct().getLegs().stream())
+        .map(leg -> leg.getType())
+        .collect(toImmutableSet());
+    boolean startConv = trades.stream()
+        .flatMap(trade -> trade.getProduct().getLegs().stream())
+        .flatMap(filtering(ScheduledSwapLeg.class))
+        .anyMatch(leg -> leg.getAccrualSchedule().getStartDateBusinessDayAdjustment().isPresent());
+    boolean endConv = trades.stream()
+        .flatMap(trade -> trade.getProduct().getLegs().stream())
+        .flatMap(filtering(ScheduledSwapLeg.class))
+        .anyMatch(leg -> leg.getAccrualSchedule().getEndDateBusinessDayAdjustment().isPresent());
+    boolean overrideStart = trades.stream()
+        .flatMap(trade -> trade.getProduct().getLegs().stream())
+        .flatMap(filtering(ScheduledSwapLeg.class))
+        .anyMatch(leg -> leg.getAccrualSchedule().getOverrideStartDate().isPresent());
+    boolean fxReset = trades.stream()
+        .flatMap(trade -> trade.getProduct().getLegs().stream())
+        .flatMap(filtering(RateCalculationSwapLeg.class))
+        .anyMatch(leg -> leg.getNotionalSchedule().getFxReset().isPresent());
+    boolean fvNotional = trades.stream()
+        .flatMap(trade -> trade.getProduct().getLegs().stream())
+        .flatMap(filtering(RateCalculationSwapLeg.class))
+        .map(leg -> leg.getCalculation())
+        .flatMap(filtering(FixedRateCalculation.class))
+        .anyMatch(calc -> calc.getFutureValueNotional().isPresent());
+    boolean firstRate = trades.stream()
+        .flatMap(trade -> trade.getProduct().getLegs().stream())
+        .flatMap(filtering(RateCalculationSwapLeg.class))
+        .map(leg -> leg.getCalculation())
+        .flatMap(filtering(IborRateCalculation.class))
+        .anyMatch(calc -> calc.getFirstRate().isPresent() || calc.getFirstRegularRate().isPresent());
+    boolean stubRate = trades.stream()
+        .flatMap(trade -> trade.getProduct().getLegs().stream())
+        .flatMap(filtering(RateCalculationSwapLeg.class))
+        .map(leg -> leg.getCalculation())
+        .flatMap(filtering(IborRateCalculation.class))
+        .anyMatch(calc -> calc.getInitialStub().isPresent() || calc.getFinalStub().isPresent());
+    boolean resetSchedule = trades.stream()
+        .flatMap(trade -> trade.getProduct().getLegs().stream())
+        .flatMap(filtering(RateCalculationSwapLeg.class))
+        .map(leg -> leg.getCalculation())
+        .flatMap(filtering(IborRateCalculation.class))
+        .anyMatch(calc -> calc.getResetPeriods().isPresent());
+    List<String> headers = new ArrayList<>();
+    for (int i = 0; i < legs; i++) {
+      String prefix = "Leg " + (i + 1) + " ";
+      // accrual schedule
+      headers.add(prefix + DIRECTION_FIELD);
+      headers.add(prefix + START_DATE_FIELD);
+      if (startConv) {
+        headers.add(prefix + START_DATE_CNV_FIELD);
+        headers.add(prefix + START_DATE_CAL_FIELD);
+      }
+      headers.add(prefix + END_DATE_FIELD);
+      if (endConv) {
+        headers.add(prefix + END_DATE_CNV_FIELD);
+        headers.add(prefix + END_DATE_CAL_FIELD);
+      }
+      headers.add(prefix + FREQUENCY_FIELD);
+      headers.add(prefix + ROLL_CONVENTION_FIELD);
+      headers.add(prefix + STUB_CONVENTION_FIELD);
+      if (overrideStart) {
+        headers.add(prefix + OVERRIDE_START_DATE_FIELD);
+        headers.add(prefix + OVERRIDE_START_DATE_CNV_FIELD);
+        headers.add(prefix + OVERRIDE_START_DATE_CAL_FIELD);
+      }
+      headers.add(prefix + FIRST_REGULAR_START_DATE_FIELD);
+      headers.add(prefix + LAST_REGULAR_END_DATE_FIELD);
+      headers.add(prefix + DATE_ADJ_CNV_FIELD);
+      headers.add(prefix + DATE_ADJ_CAL_FIELD);
+      // payment schedule
+      headers.add(prefix + PAYMENT_FREQUENCY_FIELD);
+      headers.add(prefix + PAYMENT_RELATIVE_TO_FIELD);
+      headers.add(prefix + PAYMENT_OFFSET_DAYS_FIELD);
+      headers.add(prefix + PAYMENT_OFFSET_CAL_FIELD);
+      headers.add(prefix + PAYMENT_OFFSET_ADJ_CNV_FIELD);
+      headers.add(prefix + PAYMENT_OFFSET_ADJ_CAL_FIELD);
+      headers.add(prefix + COMPOUNDING_METHOD_FIELD);
+      headers.add(prefix + PAYMENT_FIRST_REGULAR_START_DATE_FIELD);
+      headers.add(prefix + PAYMENT_LAST_REGULAR_END_DATE_FIELD);
+      // notional
+      headers.add(prefix + CURRENCY_FIELD);
+      headers.add(prefix + NOTIONAL_FIELD);
+      headers.add(prefix + NOTIONAL_INITIAL_EXCHANGE_FIELD);
+      headers.add(prefix + NOTIONAL_INTERMEDIATE_EXCHANGE_FIELD);
+      headers.add(prefix + NOTIONAL_FINAL_EXCHANGE_FIELD);
+      if (fxReset) {
+        headers.add(prefix + NOTIONAL_CURRENCY_FIELD);
+        headers.add(prefix + FX_RESET_INDEX_FIELD);
+        headers.add(prefix + FX_RESET_RELATIVE_TO_FIELD);
+        headers.add(prefix + FX_RESET_OFFSET_DAYS_FIELD);
+        headers.add(prefix + FX_RESET_OFFSET_CAL_FIELD);
+        headers.add(prefix + FX_RESET_OFFSET_ADJ_CNV_FIELD);
+        headers.add(prefix + FX_RESET_OFFSET_ADJ_CAL_FIELD);
+      }
+      // calculation
+      headers.add(prefix + DAY_COUNT_FIELD);
+      headers.add(prefix + FIXED_RATE_FIELD);
+      if (fvNotional) {
+        headers.add(prefix + FUTURE_VALUE_NOTIONAL_FIELD);
+      }
+      headers.add(prefix + INDEX_FIELD);
+      if (firstRate) {
+        headers.add(prefix + FIRST_RATE_FIELD);
+        headers.add(prefix + FIRST_REGULAR_RATE_FIELD);
+      }
+      headers.add(prefix + NEGATIVE_RATE_METHOD_FIELD);
+      headers.add(prefix + GEARING_FIELD);
+      headers.add(prefix + SPREAD_FIELD);
+      if (stubRate) {
+        headers.add(prefix + INITIAL_STUB_RATE_FIELD);
+        headers.add(prefix + INITIAL_STUB_AMOUNT_FIELD);
+        headers.add(prefix + INITIAL_STUB_AMOUNT_CURRENCY_FIELD);
+        headers.add(prefix + INITIAL_STUB_INDEX_FIELD);
+        headers.add(prefix + INITIAL_STUB_INTERPOLATED_INDEX_FIELD);
+        headers.add(prefix + FINAL_STUB_RATE_FIELD);
+        headers.add(prefix + FINAL_STUB_AMOUNT_FIELD);
+        headers.add(prefix + FINAL_STUB_AMOUNT_CURRENCY_FIELD);
+        headers.add(prefix + FINAL_STUB_INDEX_FIELD);
+        headers.add(prefix + FINAL_STUB_INTERPOLATED_INDEX_FIELD);
+      }
+      if (legTypes.contains(SwapLegType.IBOR)) {
+        headers.add(prefix + FIXING_RELATIVE_TO_FIELD);
+        headers.add(prefix + FIXING_OFFSET_DAYS_FIELD);
+        headers.add(prefix + FIXING_OFFSET_CAL_FIELD);
+        headers.add(prefix + FIXING_OFFSET_ADJ_CNV_FIELD);
+        headers.add(prefix + FIXING_OFFSET_ADJ_CAL_FIELD);
+        if (resetSchedule) {
+          headers.add(prefix + RESET_FREQUENCY_FIELD);
+          headers.add(prefix + RESET_DATE_CNV_FIELD);
+          headers.add(prefix + RESET_DATE_CAL_FIELD);
+          headers.add(prefix + RESET_METHOD_FIELD);
+        }
+      }
+      if (legTypes.contains(SwapLegType.OVERNIGHT)) {
+        headers.add(prefix + ACCRUAL_METHOD_FIELD);
+        headers.add(prefix + RATE_CUT_OFF_DAYS_FIELD);
+      }
+      if (legTypes.contains(SwapLegType.INFLATION)) {
+        headers.add(prefix + INFLATION_LAG_FIELD);
+        headers.add(prefix + INFLATION_METHOD_FIELD);
+        headers.add(prefix + INFLATION_FIRST_INDEX_VALUE_FIELD);
+      }
+    }
+    return headers;
+  }
+
+  @Override
+  public void writeCsv(CsvRowOutputWithHeaders csv, SwapTrade trade) {
+    Swap product = trade.getProduct();
+    csv.writeCell(TradeCsvLoader.TYPE_FIELD, "Swap");
+    List<Map<String, String>> variableElements = new ArrayList<>();
+    for (int i = 0; i < product.getLegs().size(); i++) {
+      String prefix = "Leg " + (i + 1) + " ";
+      SwapLeg swapLeg = product.getLegs().get(i);
+      csv.writeCell(prefix + DIRECTION_FIELD, swapLeg.getPayReceive());
+      if (swapLeg instanceof RateCalculationSwapLeg) {
+        RateCalculationSwapLeg leg = (RateCalculationSwapLeg) swapLeg;
+        writeAccrualSchedule(csv, prefix, leg);
+        writePaymentSchedule(csv, prefix, leg);
+        variableElements.addAll(writeNotionalSchedule(csv, prefix, leg));
+        variableElements.addAll(writeRateCalculation(csv, prefix, leg));
+      } else if (swapLeg instanceof KnownAmountSwapLeg) {
+        KnownAmountSwapLeg leg = (KnownAmountSwapLeg) swapLeg;
+        writeAccrualSchedule(csv, prefix, leg);
+        writePaymentSchedule(csv, prefix, leg);
+        variableElements.addAll(writeKnownAmount(csv, prefix, leg));
+      } else {
+        throw new IllegalArgumentException("Unable to convert swap leg to CSV: " + swapLeg.getClass().getSimpleName());
+      }
+    }
+    csv.writeNewLine();
+    // write variable element rows
+    for (Map<String, String> variableElement : variableElements) {
+      csv.writeLine(variableElement);
+    }
+  }
+
+  // writes the accrual schedule
+  private void writeAccrualSchedule(CsvRowOutputWithHeaders csv, String prefix, ScheduledSwapLeg leg) {
+    PeriodicSchedule accrual = leg.getAccrualSchedule();
+    csv.writeCell(prefix + START_DATE_FIELD, accrual.getStartDate());
+    accrual.getStartDateBusinessDayAdjustment().ifPresent(bda -> {
+      csv.writeCell(prefix + START_DATE_CNV_FIELD, bda.getConvention());
+      csv.writeCell(prefix + START_DATE_CAL_FIELD, bda.getCalendar());
+    });
+    csv.writeCell(prefix + END_DATE_FIELD, accrual.getEndDate());
+    accrual.getEndDateBusinessDayAdjustment().ifPresent(bda -> {
+      csv.writeCell(prefix + END_DATE_CNV_FIELD, bda.getConvention());
+      csv.writeCell(prefix + END_DATE_CAL_FIELD, bda.getCalendar());
+    });
+    csv.writeCell(prefix + FREQUENCY_FIELD, accrual.getFrequency());
+    accrual.getRollConvention().ifPresent(val -> csv.writeCell(prefix + ROLL_CONVENTION_FIELD, val));
+    accrual.getStubConvention().ifPresent(val -> csv.writeCell(prefix + STUB_CONVENTION_FIELD, val));
+    accrual.getOverrideStartDate().ifPresent(date -> {
+      csv.writeCell(prefix + OVERRIDE_START_DATE_FIELD, date.getUnadjusted());
+      csv.writeCell(prefix + OVERRIDE_START_DATE_CNV_FIELD, date.getAdjustment().getConvention());
+      csv.writeCell(prefix + OVERRIDE_START_DATE_CAL_FIELD, date.getAdjustment().getCalendar());
+    });
+    accrual.getFirstRegularStartDate().ifPresent(val -> csv.writeCell(prefix + FIRST_REGULAR_START_DATE_FIELD, val));
+    accrual.getLastRegularEndDate().ifPresent(val -> csv.writeCell(prefix + LAST_REGULAR_END_DATE_FIELD, val));
+    csv.writeCell(prefix + DATE_ADJ_CNV_FIELD, accrual.getBusinessDayAdjustment().getConvention());
+    csv.writeCell(prefix + DATE_ADJ_CAL_FIELD, accrual.getBusinessDayAdjustment().getCalendar());
+  }
+
+  // writes the payment schedule
+  private void writePaymentSchedule(CsvRowOutputWithHeaders csv, String prefix, ScheduledSwapLeg leg) {
+    PaymentSchedule payment = leg.getPaymentSchedule();
+    csv.writeCell(prefix + PAYMENT_FREQUENCY_FIELD, payment.getPaymentFrequency());
+    csv.writeCell(prefix + PAYMENT_RELATIVE_TO_FIELD, payment.getPaymentRelativeTo());
+    DaysAdjustment payOffset = payment.getPaymentDateOffset();
+    csv.writeCell(prefix + PAYMENT_OFFSET_DAYS_FIELD, payOffset.getDays());
+    csv.writeCell(prefix + PAYMENT_OFFSET_CAL_FIELD, payOffset.getCalendar());
+    csv.writeCell(prefix + PAYMENT_OFFSET_ADJ_CNV_FIELD, payOffset.getAdjustment().getConvention());
+    csv.writeCell(prefix + PAYMENT_OFFSET_ADJ_CAL_FIELD, payOffset.getAdjustment().getCalendar());
+    csv.writeCell(prefix + COMPOUNDING_METHOD_FIELD, payment.getCompoundingMethod());
+    payment.getFirstRegularStartDate()
+        .ifPresent(val -> csv.writeCell(prefix + PAYMENT_FIRST_REGULAR_START_DATE_FIELD, val));
+    payment.getLastRegularEndDate()
+        .ifPresent(val -> csv.writeCell(prefix + PAYMENT_LAST_REGULAR_END_DATE_FIELD, val));
+  }
+
+  // writes the notional schedule
+  private List<Map<String, String>> writeNotionalSchedule(
+      CsvRowOutputWithHeaders csv,
+      String prefix,
+      RateCalculationSwapLeg leg) {
+
+    NotionalSchedule notional = leg.getNotionalSchedule();
+    csv.writeCell(prefix + CURRENCY_FIELD, notional.getCurrency());
+    csv.writeCell(prefix + NOTIONAL_FIELD, notional.getAmount().getInitialValue());
+    csv.writeCell(prefix + NOTIONAL_INITIAL_EXCHANGE_FIELD, notional.isInitialExchange());
+    csv.writeCell(prefix + NOTIONAL_INTERMEDIATE_EXCHANGE_FIELD, notional.isIntermediateExchange());
+    csv.writeCell(prefix + NOTIONAL_FINAL_EXCHANGE_FIELD, notional.isFinalExchange());
+    notional.getFxReset().ifPresent(reset -> {
+      csv.writeCell(prefix + NOTIONAL_CURRENCY_FIELD, reset.getReferenceCurrency());
+      csv.writeCell(prefix + FX_RESET_INDEX_FIELD, reset.getIndex());
+      csv.writeCell(prefix + FX_RESET_RELATIVE_TO_FIELD, reset.getFixingRelativeTo());
+      DaysAdjustment fixingOffset = reset.getFixingDateOffset();
+      csv.writeCell(prefix + FX_RESET_OFFSET_DAYS_FIELD, fixingOffset.getDays());
+      csv.writeCell(prefix + FX_RESET_OFFSET_CAL_FIELD, fixingOffset.getCalendar());
+      csv.writeCell(prefix + FX_RESET_OFFSET_ADJ_CNV_FIELD, fixingOffset.getAdjustment().getConvention());
+      csv.writeCell(prefix + FX_RESET_OFFSET_ADJ_CAL_FIELD, fixingOffset.getAdjustment().getCalendar());
+      reset.getInitialNotionalValue().ifPresent(val -> csv.writeCell(prefix + FX_RESET_INITIAL_NOTIONAL_FIELD, val));
+    });
+
+    // ignore variable notional step sequence and non-replace types
+    List<Map<String, String>> variableRows = new ArrayList<>();
+    if (!notional.getAmount().getSteps().isEmpty()) {
+      for (ValueStep step : notional.getAmount().getSteps()) {
+        if (step.getDate().isPresent() && step.getValue().getType() == ValueAdjustmentType.REPLACE) {
+          Map<String, String> row = new HashMap<>();
+          row.put(prefix + START_DATE_FIELD, step.getDate().get().toString());
+          row.put(prefix + NOTIONAL_FIELD, Double.toString(step.getValue().getModifyingValue()));
+          variableRows.add(row);
+        }
+      }
+    }
+    return variableRows;
+  }
+
+  // writes the calculation
+  private List<Map<String, String>> writeRateCalculation(
+      CsvRowOutputWithHeaders csv,
+      String prefix,
+      RateCalculationSwapLeg leg) {
+
+    List<Map<String, String>> variableRows = new ArrayList<>();
+    csv.writeCell(prefix + DAY_COUNT_FIELD, leg.getCalculation().getDayCount());
+    if (leg.getCalculation() instanceof FixedRateCalculation) {
+      FixedRateCalculation fixed = (FixedRateCalculation) leg.getCalculation();
+      csv.writeCell(prefix + FIXED_RATE_FIELD, fixed.getRate().getInitialValue() * 100);
+      fixed.getFutureValueNotional().ifPresent(fvn -> {
+        // only write the value, not the date/days
+        fvn.getValue().ifPresent(val -> csv.writeCell(prefix + FUTURE_VALUE_NOTIONAL_FIELD, val));
+      });
+      fixed.getInitialStub().ifPresent(stub -> {
+        stub.getFixedRate().ifPresent(val -> csv.writeCell(prefix + INITIAL_STUB_RATE_FIELD, val * 100));
+        stub.getKnownAmount().ifPresent(val -> csv.writeCell(prefix + INITIAL_STUB_AMOUNT_FIELD, val.getAmount()));
+        stub.getKnownAmount().ifPresent(amount -> {
+          csv.writeCell(prefix + INITIAL_STUB_AMOUNT_FIELD, amount.getAmount());
+          csv.writeCell(prefix + INITIAL_STUB_AMOUNT_CURRENCY_FIELD, amount.getCurrency());
+        });
+      });
+      fixed.getFinalStub().ifPresent(stub -> {
+        stub.getFixedRate().ifPresent(val -> csv.writeCell(prefix + FINAL_STUB_RATE_FIELD, val * 100));
+        stub.getKnownAmount().ifPresent(amount -> {
+          csv.writeCell(prefix + FINAL_STUB_AMOUNT_FIELD, amount.getAmount());
+          csv.writeCell(prefix + FINAL_STUB_AMOUNT_CURRENCY_FIELD, amount.getCurrency());
+        });
+      });
+      // ignore variable fixed rate step sequence and non-replace types
+      if (!fixed.getRate().getSteps().isEmpty()) {
+        for (ValueStep step : fixed.getRate().getSteps()) {
+          if (step.getDate().isPresent() && step.getValue().getType() == ValueAdjustmentType.REPLACE) {
+            Map<String, String> row = new HashMap<>();
+            row.put(prefix + START_DATE_FIELD, step.getDate().get().toString());
+            row.put(prefix + FIXED_RATE_FIELD, Double.toString(step.getValue().getModifyingValue()));
+            variableRows.add(row);
+          }
+        }
+      }
+
+    } else if (leg.getCalculation() instanceof IborRateCalculation) {
+      // ignore first fixing date offset and variable gearing/spread
+      IborRateCalculation ibor = (IborRateCalculation) leg.getCalculation();
+      csv.writeCell(prefix + INDEX_FIELD, ibor.getIndex());
+      ibor.getFirstRate().ifPresent(val -> csv.writeCell(prefix + FIRST_RATE_FIELD, val * 100));
+      ibor.getFirstRegularRate().ifPresent(val -> csv.writeCell(prefix + FIRST_REGULAR_RATE_FIELD, val * 100));
+      csv.writeCell(prefix + NEGATIVE_RATE_METHOD_FIELD, ibor.getNegativeRateMethod());
+      ibor.getGearing().ifPresent(val -> csv.writeCell(prefix + GEARING_FIELD, val.getInitialValue() * 100));
+      ibor.getSpread().ifPresent(val -> csv.writeCell(prefix + SPREAD_FIELD, val.getInitialValue() * 100));
+      ibor.getInitialStub().ifPresent(stub -> {
+        stub.getFixedRate().ifPresent(val -> csv.writeCell(prefix + INITIAL_STUB_RATE_FIELD, val * 100));
+        stub.getKnownAmount().ifPresent(amount -> {
+          csv.writeCell(prefix + INITIAL_STUB_AMOUNT_FIELD, amount.getAmount());
+          csv.writeCell(prefix + INITIAL_STUB_AMOUNT_CURRENCY_FIELD, amount.getCurrency());
+        });
+        stub.getIndex().ifPresent(val -> csv.writeCell(prefix + INITIAL_STUB_INDEX_FIELD, val));
+        stub.getIndexInterpolated().ifPresent(v -> csv.writeCell(prefix + INITIAL_STUB_INTERPOLATED_INDEX_FIELD, v));
+      });
+      ibor.getFinalStub().ifPresent(stub -> {
+        stub.getFixedRate().ifPresent(val -> csv.writeCell(prefix + FINAL_STUB_RATE_FIELD, val * 100));
+        stub.getKnownAmount().ifPresent(amount -> {
+          csv.writeCell(prefix + FINAL_STUB_AMOUNT_FIELD, amount.getAmount());
+          csv.writeCell(prefix + FINAL_STUB_AMOUNT_CURRENCY_FIELD, amount.getCurrency());
+        });
+        stub.getIndex().ifPresent(val -> csv.writeCell(prefix + FINAL_STUB_INDEX_FIELD, val));
+        stub.getIndexInterpolated().ifPresent(v -> csv.writeCell(prefix + FINAL_STUB_INTERPOLATED_INDEX_FIELD, v));
+      });
+      csv.writeCell(prefix + FIXING_RELATIVE_TO_FIELD, ibor.getFixingRelativeTo());
+      DaysAdjustment fixingOffset = ibor.getFixingDateOffset();
+      csv.writeCell(prefix + FIXING_OFFSET_DAYS_FIELD, fixingOffset.getDays());
+      csv.writeCell(prefix + FIXING_OFFSET_CAL_FIELD, fixingOffset.getCalendar());
+      csv.writeCell(prefix + FIXING_OFFSET_ADJ_CNV_FIELD, fixingOffset.getAdjustment().getConvention());
+      csv.writeCell(prefix + FIXING_OFFSET_ADJ_CAL_FIELD, fixingOffset.getAdjustment().getCalendar());
+      ibor.getResetPeriods().ifPresent(resets -> {
+        csv.writeCell(prefix + RESET_FREQUENCY_FIELD, resets.getResetFrequency());
+        csv.writeCell(prefix + RESET_DATE_CNV_FIELD, resets.getBusinessDayAdjustment().getConvention());
+        csv.writeCell(prefix + RESET_DATE_CAL_FIELD, resets.getBusinessDayAdjustment().getCalendar());
+        csv.writeCell(prefix + RESET_METHOD_FIELD, resets.getResetMethod());
+      });
+
+    } else if (leg.getCalculation() instanceof OvernightRateCalculation) {
+      // ignore variable gearing/spread
+      OvernightRateCalculation on = (OvernightRateCalculation) leg.getCalculation();
+      csv.writeCell(prefix + INDEX_FIELD, on.getIndex());
+      csv.writeCell(prefix + RATE_CUT_OFF_DAYS_FIELD, on.getRateCutOffDays());
+      csv.writeCell(prefix + ACCRUAL_METHOD_FIELD, on.getAccrualMethod());
+      csv.writeCell(prefix + NEGATIVE_RATE_METHOD_FIELD, on.getNegativeRateMethod());
+      on.getGearing().ifPresent(val -> csv.writeCell(prefix + GEARING_FIELD, val.getInitialValue() * 100));
+      on.getSpread().ifPresent(val -> csv.writeCell(prefix + SPREAD_FIELD, val.getInitialValue() * 100));
+
+    } else if (leg.getCalculation() instanceof InflationRateCalculation) {
+      // ignore variable gearing
+      InflationRateCalculation inf = (InflationRateCalculation) leg.getCalculation();
+      csv.writeCell(prefix + INDEX_FIELD, inf.getIndex());
+      csv.writeCell(prefix + INFLATION_LAG_FIELD, inf.getLag());
+      csv.writeCell(prefix + INFLATION_METHOD_FIELD, inf.getIndexCalculationMethod());
+      inf.getFirstIndexValue().ifPresent(val -> csv.writeCell(prefix + INFLATION_FIRST_INDEX_VALUE_FIELD, val));
+      inf.getGearing().ifPresent(val -> csv.writeCell(prefix + GEARING_FIELD, val.getInitialValue() * 100));
+
+    } else {
+      throw new IllegalArgumentException(
+          "Unable to convert swap leg rate calculation to CSV: " + leg.getCalculation().getClass().getSimpleName());
+    }
+    return variableRows;
+  }
+
+  // writes the known amount
+  private List<Map<String, String>> writeKnownAmount(
+      CsvRowOutputWithHeaders csv,
+      String prefix,
+      KnownAmountSwapLeg leg) {
+
+    csv.writeCell(prefix + CURRENCY_FIELD, leg.getCurrency());
+    csv.writeCell(prefix + KNOWN_AMOUNT_FIELD, leg.getAmount().getInitialValue());
+
+    // ignore variable known amount step sequence and non-replace types
+    List<Map<String, String>> rows = new ArrayList<>();
+    if (!leg.getAmount().getSteps().isEmpty()) {
+      for (ValueStep step : leg.getAmount().getSteps()) {
+        if (step.getDate().isPresent() && step.getValue().getType() == ValueAdjustmentType.REPLACE) {
+          Map<String, String> row = new HashMap<>();
+          row.put(prefix + START_DATE_FIELD, step.getDate().get().toString());
+          row.put(prefix + KNOWN_AMOUNT_FIELD, Double.toString(step.getValue().getModifyingValue()));
+          rows.add(row);
+        }
+      }
+    }
+    return rows;
   }
 
   //-------------------------------------------------------------------------

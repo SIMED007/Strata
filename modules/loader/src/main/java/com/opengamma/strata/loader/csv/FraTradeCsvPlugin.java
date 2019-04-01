@@ -7,6 +7,7 @@ package com.opengamma.strata.loader.csv;
 
 import static com.opengamma.strata.loader.csv.TradeCsvLoader.BUY_SELL_FIELD;
 import static com.opengamma.strata.loader.csv.TradeCsvLoader.CONVENTION_FIELD;
+import static com.opengamma.strata.loader.csv.TradeCsvLoader.CURRENCY_FIELD;
 import static com.opengamma.strata.loader.csv.TradeCsvLoader.DATE_ADJ_CAL_FIELD;
 import static com.opengamma.strata.loader.csv.TradeCsvLoader.DATE_ADJ_CNV_FIELD;
 import static com.opengamma.strata.loader.csv.TradeCsvLoader.DAY_COUNT_FIELD;
@@ -15,34 +16,70 @@ import static com.opengamma.strata.loader.csv.TradeCsvLoader.FIXED_RATE_FIELD;
 import static com.opengamma.strata.loader.csv.TradeCsvLoader.INDEX_FIELD;
 import static com.opengamma.strata.loader.csv.TradeCsvLoader.INTERPOLATED_INDEX_FIELD;
 import static com.opengamma.strata.loader.csv.TradeCsvLoader.NOTIONAL_FIELD;
+import static com.opengamma.strata.loader.csv.TradeCsvLoader.PAYMENT_DATE_CAL_FIELD;
+import static com.opengamma.strata.loader.csv.TradeCsvLoader.PAYMENT_DATE_CNV_FIELD;
+import static com.opengamma.strata.loader.csv.TradeCsvLoader.PAYMENT_DATE_FIELD;
 import static com.opengamma.strata.loader.csv.TradeCsvLoader.PERIOD_TO_START_FIELD;
 import static com.opengamma.strata.loader.csv.TradeCsvLoader.START_DATE_FIELD;
 import static com.opengamma.strata.loader.csv.TradeCsvLoader.TRADE_DATE_FIELD;
 
 import java.time.LocalDate;
 import java.time.Period;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 
 import com.google.common.collect.ImmutableList;
+import com.opengamma.strata.basics.currency.Currency;
 import com.opengamma.strata.basics.date.BusinessDayAdjustment;
 import com.opengamma.strata.basics.date.BusinessDayConvention;
 import com.opengamma.strata.basics.date.BusinessDayConventions;
 import com.opengamma.strata.basics.date.DayCount;
 import com.opengamma.strata.basics.date.HolidayCalendarId;
 import com.opengamma.strata.basics.index.IborIndex;
+import com.opengamma.strata.collect.io.CsvOutput.CsvRowOutputWithHeaders;
 import com.opengamma.strata.collect.io.CsvRow;
 import com.opengamma.strata.loader.LoaderUtils;
 import com.opengamma.strata.product.TradeInfo;
 import com.opengamma.strata.product.common.BuySell;
 import com.opengamma.strata.product.fra.Fra;
+import com.opengamma.strata.product.fra.FraDiscountingMethod;
 import com.opengamma.strata.product.fra.FraTrade;
 import com.opengamma.strata.product.fra.type.FraConvention;
 
 /**
- * Loads FRA trades from CSV files.
+ * Handles the CSV file format for FRA trades.
  */
-final class FraTradeCsvPlugin {
+final class FraTradeCsvPlugin implements TradeTypeCsvWriter<FraTrade> {
 
+  /**
+   * The singleton instance of the plugin.
+   */
+  public static final TradeTypeCsvWriter<FraTrade> INSTANCE = new FraTradeCsvPlugin();
+
+  /** The discounting method. */
+  private static final String FRA_DISCOUNTING_FIELD = "FRA Discounting Method";
+
+  /** The headers. */
+  private static final ImmutableList<String> HEADERS = ImmutableList.<String>builder()
+      .add(START_DATE_FIELD)
+      .add(END_DATE_FIELD)
+      .add(BUY_SELL_FIELD)
+      .add(CURRENCY_FIELD)
+      .add(NOTIONAL_FIELD)
+      .add(FIXED_RATE_FIELD)
+      .add(INDEX_FIELD)
+      .add(INTERPOLATED_INDEX_FIELD)
+      .add(DAY_COUNT_FIELD)
+      .add(FRA_DISCOUNTING_FIELD)
+      .add(DATE_ADJ_CNV_FIELD)
+      .add(DATE_ADJ_CAL_FIELD)
+      .add(PAYMENT_DATE_FIELD)
+      .add(PAYMENT_DATE_CNV_FIELD)
+      .add(PAYMENT_DATE_CAL_FIELD)
+      .build();
+
+  //-------------------------------------------------------------------------
   /**
    * Parses from the CSV row.
    * 
@@ -59,6 +96,7 @@ final class FraTradeCsvPlugin {
   // parse the row to a trade
   private static FraTrade parseRow(CsvRow row, TradeInfo info, TradeCsvInfoResolver resolver) {
     BuySell buySell = LoaderUtils.parseBuySell(row.getValue(BUY_SELL_FIELD));
+    Optional<Currency> currencyOpt = row.findValue(CURRENCY_FIELD).map(s -> Currency.of(s));
     double notional = LoaderUtils.parseDouble(row.getValue(NOTIONAL_FIELD));
     double fixedRate = LoaderUtils.parseDoublePercent(row.getValue(FIXED_RATE_FIELD));
     Optional<FraConvention> conventionOpt = row.findValue(CONVENTION_FIELD).map(s -> FraConvention.of(s));
@@ -68,6 +106,8 @@ final class FraTradeCsvPlugin {
     Optional<IborIndex> indexOpt = row.findValue(INDEX_FIELD).map(s -> IborIndex.of(s));
     Optional<IborIndex> interpolatedOpt = row.findValue(INTERPOLATED_INDEX_FIELD).map(s -> IborIndex.of(s));
     Optional<DayCount> dayCountOpt = row.findValue(DAY_COUNT_FIELD).map(s -> LoaderUtils.parseDayCount(s));
+    Optional<FraDiscountingMethod> discMethodOpt =
+        row.findValue(FRA_DISCOUNTING_FIELD).map(s -> FraDiscountingMethod.of(s));
     BusinessDayConvention dateCnv = row.findValue(DATE_ADJ_CNV_FIELD)
         .map(s -> LoaderUtils.parseBusinessDayConvention(s)).orElse(BusinessDayConventions.MODIFIED_FOLLOWING);
     Optional<HolidayCalendarId> dateCalOpt = row.findValue(DATE_ADJ_CAL_FIELD).map(s -> HolidayCalendarId.of(s));
@@ -95,7 +135,7 @@ final class FraTradeCsvPlugin {
         LocalDate endDate = endDateOpt.get();
         // NOTE: payment date assumed to be the start date
         FraTrade trade = convention.toTrade(info, startDate, endDate, startDate, buySell, notional, fixedRate);
-        return adjustTrade(trade, dateCnv, dateCalOpt);
+        return adjustTrade(trade, currencyOpt, discMethodOpt, dateCnv, dateCalOpt);
       }
       // relative dates
       if (periodToStartOpt.isPresent() && info.getTradeDate().isPresent()) {
@@ -111,7 +151,7 @@ final class FraTradeCsvPlugin {
         FraTrade trade =
             convention.createTrade(tradeDate, periodToStart, buySell, notional, fixedRate, resolver.getReferenceData());
         trade = trade.toBuilder().info(info).build();
-        return adjustTrade(trade, dateCnv, dateCalOpt);
+        return adjustTrade(trade, currencyOpt, discMethodOpt, dateCnv, dateCalOpt);
       }
 
     } else if (startDateOpt.isPresent() && endDateOpt.isPresent() && indexOpt.isPresent()) {
@@ -127,7 +167,7 @@ final class FraTradeCsvPlugin {
           .index(index);
       interpolatedOpt.ifPresent(interpolated -> builder.indexInterpolated(interpolated));
       dayCountOpt.ifPresent(dayCount -> builder.dayCount(dayCount));
-      return adjustTrade(FraTrade.of(info, builder.build()), dateCnv, dateCalOpt);
+      return adjustTrade(FraTrade.of(info, builder.build()), currencyOpt, discMethodOpt, dateCnv, dateCalOpt);
     }
     // no match
     throw new IllegalArgumentException(
@@ -144,17 +184,77 @@ final class FraTradeCsvPlugin {
   // adjust trade based on additional fields specified
   private static FraTrade adjustTrade(
       FraTrade trade,
+      Optional<Currency> currencyOpt,
+      Optional<FraDiscountingMethod> discMethodOpt,
       BusinessDayConvention dateCnv,
       Optional<HolidayCalendarId> dateCalOpt) {
 
-    if (!dateCalOpt.isPresent()) {
+    if (!currencyOpt.isPresent() && !discMethodOpt.isPresent() && !dateCalOpt.isPresent()) {
       return trade;
     }
     Fra.Builder builder = trade.getProduct().toBuilder();
+    currencyOpt.ifPresent(currency -> builder.currency(currency));
+    discMethodOpt.ifPresent(discMethod -> builder.discounting(discMethod));
     dateCalOpt.ifPresent(cal -> builder.businessDayAdjustment(BusinessDayAdjustment.of(dateCnv, cal)));
     return trade.toBuilder()
         .product(builder.build())
         .build();
+  }
+
+  //-------------------------------------------------------------------------
+  @Override
+  public List<String> headers(List<FraTrade> trades) {
+    boolean currencyNeeded = trades.stream()
+        .anyMatch(trade -> !trade.getProduct().getCurrency().equals(trade.getProduct().getIndex().getCurrency()));
+    boolean dayCountNeeded = trades.stream()
+        .anyMatch(trade -> !trade.getProduct().getDayCount().equals(trade.getProduct().getIndex().getDayCount()));
+    boolean discNeeded = trades.stream()
+        .anyMatch(trade -> !trade.getProduct().getDiscounting().equals(FraDiscountingMethod.ISDA));
+    if (!currencyNeeded && !dayCountNeeded && !discNeeded) {
+      return HEADERS;
+    } else {
+      List<String> headers = new ArrayList<>(HEADERS);
+      if (!currencyNeeded) {
+        headers.remove(CURRENCY_FIELD);
+      }
+      if (!dayCountNeeded) {
+        headers.remove(DAY_COUNT_FIELD);
+      }
+      if (!discNeeded) {
+        headers.remove(FRA_DISCOUNTING_FIELD);
+      }
+      return headers;
+    }
+  }
+
+  @Override
+  public void writeCsv(CsvRowOutputWithHeaders csv, FraTrade trade) {
+    Fra product = trade.getProduct();
+    csv.writeCell(TradeCsvLoader.TYPE_FIELD, "Fra");
+    csv.writeCell(START_DATE_FIELD, product.getStartDate());
+    csv.writeCell(END_DATE_FIELD, product.getEndDate());
+    csv.writeCell(BUY_SELL_FIELD, product.getBuySell());
+    if (!product.getCurrency().equals(product.getIndex().getCurrency())) {
+      csv.writeCell(CURRENCY_FIELD, product.getCurrency());
+    }
+    csv.writeCell(NOTIONAL_FIELD, product.getNotional());
+    csv.writeCell(FIXED_RATE_FIELD, product.getFixedRate() * 100);
+    csv.writeCell(INDEX_FIELD, product.getIndex());
+    product.getIndexInterpolated().ifPresent(index -> csv.writeCell(INTERPOLATED_INDEX_FIELD, index));
+    if (!product.getDayCount().equals(product.getIndex().getDayCount())) {
+      csv.writeCell(DAY_COUNT_FIELD, product.getDayCount());
+    }
+    if (!product.getDiscounting().equals(FraDiscountingMethod.ISDA)) {
+      csv.writeCell(FRA_DISCOUNTING_FIELD, product.getDiscounting());
+    }
+    product.getBusinessDayAdjustment().ifPresent(bda -> {
+      csv.writeCell(DATE_ADJ_CNV_FIELD, bda.getConvention());
+      csv.writeCell(DATE_ADJ_CAL_FIELD, bda.getCalendar());
+    });
+    csv.writeCell(PAYMENT_DATE_FIELD, product.getPaymentDate().getUnadjusted());
+    csv.writeCell(PAYMENT_DATE_CAL_FIELD, product.getPaymentDate().getAdjustment().getCalendar());
+    csv.writeCell(PAYMENT_DATE_CNV_FIELD, product.getPaymentDate().getAdjustment().getConvention());
+    csv.writeNewLine();
   }
 
   //-------------------------------------------------------------------------

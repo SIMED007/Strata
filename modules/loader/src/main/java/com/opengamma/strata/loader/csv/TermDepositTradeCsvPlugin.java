@@ -20,6 +20,7 @@ import static com.opengamma.strata.loader.csv.TradeCsvLoader.TRADE_DATE_FIELD;
 
 import java.time.LocalDate;
 import java.time.Period;
+import java.util.List;
 import java.util.Optional;
 
 import com.google.common.collect.ImmutableList;
@@ -29,6 +30,7 @@ import com.opengamma.strata.basics.date.BusinessDayConvention;
 import com.opengamma.strata.basics.date.BusinessDayConventions;
 import com.opengamma.strata.basics.date.DayCount;
 import com.opengamma.strata.basics.date.HolidayCalendarId;
+import com.opengamma.strata.collect.io.CsvOutput.CsvRowOutputWithHeaders;
 import com.opengamma.strata.collect.io.CsvRow;
 import com.opengamma.strata.loader.LoaderUtils;
 import com.opengamma.strata.product.TradeInfo;
@@ -38,10 +40,29 @@ import com.opengamma.strata.product.deposit.TermDepositTrade;
 import com.opengamma.strata.product.deposit.type.TermDepositConvention;
 
 /**
- * Loads TermDeposit trades from CSV files.
+ * Handles the CSV file format for Term Deposit trades.
  */
-final class TermDepositTradeCsvPlugin {
+final class TermDepositTradeCsvPlugin implements TradeTypeCsvWriter<TermDepositTrade> {
 
+  /**
+   * The singleton instance of the plugin.
+   */
+  public static final TradeTypeCsvWriter<TermDepositTrade> INSTANCE = new TermDepositTradeCsvPlugin();
+
+  /** The headers. */
+  private static final ImmutableList<String> HEADERS = ImmutableList.<String>builder()
+      .add(BUY_SELL_FIELD)
+      .add(CURRENCY_FIELD)
+      .add(NOTIONAL_FIELD)
+      .add(START_DATE_FIELD)
+      .add(END_DATE_FIELD)
+      .add(FIXED_RATE_FIELD)
+      .add(DAY_COUNT_FIELD)
+      .add(DATE_ADJ_CNV_FIELD)
+      .add(DATE_ADJ_CAL_FIELD)
+      .build();
+
+  //-------------------------------------------------------------------------
   /**
    * Parses from the CSV row.
    * 
@@ -152,6 +173,30 @@ final class TermDepositTradeCsvPlugin {
     return trade.toBuilder()
         .product(builder.build())
         .build();
+  }
+
+  //-------------------------------------------------------------------------
+  @Override
+  public List<String> headers(List<TermDepositTrade> trades) {
+    return HEADERS;
+  }
+
+  @Override
+  public void writeCsv(CsvRowOutputWithHeaders csv, TermDepositTrade trade) {
+    TermDeposit product = trade.getProduct();
+    csv.writeCell(TradeCsvLoader.TYPE_FIELD, "TermDeposit");
+    csv.writeCell(BUY_SELL_FIELD, product.getBuySell());
+    csv.writeCell(CURRENCY_FIELD, product.getCurrency());
+    csv.writeCell(NOTIONAL_FIELD, product.getNotional());
+    csv.writeCell(START_DATE_FIELD, product.getStartDate());
+    csv.writeCell(END_DATE_FIELD, product.getEndDate());
+    csv.writeCell(FIXED_RATE_FIELD, product.getRate() * 100);
+    csv.writeCell(DAY_COUNT_FIELD, product.getDayCount());
+    product.getBusinessDayAdjustment().ifPresent(bda -> {
+      csv.writeCell(DATE_ADJ_CNV_FIELD, bda.getConvention());
+      csv.writeCell(DATE_ADJ_CAL_FIELD, bda.getCalendar());
+    });
+    csv.writeNewLine();
   }
 
   //-------------------------------------------------------------------------
